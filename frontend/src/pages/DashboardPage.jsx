@@ -4,7 +4,8 @@ import SummaryCards from '../components/SummaryCards';
 import MetricsChart from '../components/MetricsChart';
 import IncidentTimeline from '../components/IncidentTimeline';
 import AIAnalysisPanel from '../components/AIAnalysisPanel';
-import { RefreshCw } from 'lucide-react';
+import MLTestPanel from '../components/MLTestPanel';
+import { RefreshCw, Beaker } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
 const POLL_INTERVAL = 5000;
@@ -21,6 +22,7 @@ function SectionLabel({ label }) {
 
 export default function DashboardPage() {
     const [selectedIncident, setSelectedIncident] = useState(null);
+    const [mlTestOpen, setMlTestOpen] = useState(false);
     const [refreshAge, setRefreshAge] = useState(0);
     const [isSyncing, setIsSyncing] = useState(false);
 
@@ -94,18 +96,27 @@ export default function DashboardPage() {
                         AI-POWERED OBSERVABILITY · MINISTRAL-3B · VERMEG SENTINEL v1.0
                     </p>
                 </div>
-                <div className="flex items-center gap-2 text-[10px] text-slate-500 font-tech">
-                    <RefreshCw
-                        size={10}
-                        className={isSyncing ? 'animate-spin text-primary-400' : 'animate-spin-slow'}
-                    />
-                    <span>
-                        {isSyncing ? (
-                            <span className="text-primary-400 font-bold">Syncing…</span>
-                        ) : (
-                            `Live · ${refreshAge}s ago`
-                        )}
-                    </span>
+                <div className="flex items-center gap-3">
+                    <button
+                        onClick={() => setMlTestOpen(true)}
+                        className="flex items-center gap-2 px-3 py-2 bg-navy-800 hover:bg-navy-700 border border-navy-600 rounded-lg transition-all text-xs font-medium text-slate-300 hover:text-slate-100"
+                    >
+                        <Beaker size={14} />
+                        ML Testing
+                    </button>
+                    <div className="flex items-center gap-2 text-[10px] text-slate-500 font-tech">
+                        <RefreshCw
+                            size={10}
+                            className={isSyncing ? 'animate-spin text-primary-400' : 'animate-spin-slow'}
+                        />
+                        <span>
+                            {isSyncing ? (
+                                <span className="text-primary-400 font-bold">Syncing…</span>
+                            ) : (
+                                `Live · ${refreshAge}s ago`
+                            )}
+                        </span>
+                    </div>
                 </div>
             </div>
 
@@ -137,6 +148,12 @@ export default function DashboardPage() {
             <AIAnalysisPanel
                 incident={selectedIncident}
                 onClose={() => setSelectedIncident(null)}
+            />
+
+            {/* ML Test Panel */}
+            <MLTestPanel
+                isOpen={mlTestOpen}
+                onClose={() => setMlTestOpen(false)}
             />
         </main>
     );

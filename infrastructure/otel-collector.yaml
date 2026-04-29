@@ -19,7 +19,7 @@ data:
       batch:
     exporters:
       elasticsearch:
-        endpoints: ["http://10.43.121.156:9200"]
+        endpoints: ["http://10.43.121.156:9200"]  # Point to Elasticsearch service
         logs_index: "vermeg-logs"
       prometheus:
         endpoint: "0.0.0.0:8889"
