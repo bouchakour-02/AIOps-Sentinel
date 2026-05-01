@@ -26,6 +26,16 @@ spec:
           value: "-Xms512m -Xmx512m"
         ports:
         - containerPort: 9200
+         # --- AJOUT 1 : Lien interne au conteneur ---
+        volumeMounts:
+        - name: elastic-storage
+          mountPath: /usr/share/elasticsearch/data
+         # --- AJOUT 2 : Lien avec le disque dur d'Ubuntu ---
+        volumes:
+        - name: elastic-storage
+          hostPath:
+          path: /mnt/data/elasticsearch
+          type: Directory
 ---
 apiVersion: v1
 kind: Service

@@ -1,0 +1,20 @@
+# Global settings for AI-Ops Sentinel
+global:
+  nodeIp: "192.168.159.136"
+
+elasticsearch:
+  image: "docker.elastic.co/elasticsearch/elasticsearch:7.17.9"
+  javaOpts: "-Xms512m -Xmx512m"
+  nodePort: 30200
+
+kibana:
+  image: "docker.elastic.co/kibana/kibana:7.17.9"
+  nodePort: 30601
+
+otelCollector:
+  image: "otel/opentelemetry-collector-contrib:0.88.0"
+  nodePort: 30318
+
+prometheus:
+  image: "prom/prometheus:latest"
+  nodePort: 30090
