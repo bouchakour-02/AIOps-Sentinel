@@ -21,32 +21,28 @@ spec:
           value: single-node
         - name: xpack.security.enabled
           value: "false"
-        # CRITICAL: This limits RAM usage to 512MB so your PC doesn't crash
         - name: ES_JAVA_OPTS
           value: "-Xms512m -Xmx512m"
         ports:
         - containerPort: 9200
-         # --- AJOUT 1 : Lien interne au conteneur ---
         volumeMounts:
         - name: elastic-storage
           mountPath: /usr/share/elasticsearch/data
-         # --- AJOUT 2 : Lien avec le disque dur d'Ubuntu ---
-        volumes:
-        - name: elastic-storage
-          hostPath:
+      volumes:
+      - name: elastic-storage
+        hostPath:
           path: /mnt/data/elasticsearch
-          type: Directory
+          type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: elasticsearch
-  namespace: default
 spec:
   selector:
     app: elasticsearch
   ports:
   - port: 9200
     targetPort: 9200
-    nodePort: 30200 # Fixed port to access from outside easily
+    nodePort: 30200
   type: NodePort

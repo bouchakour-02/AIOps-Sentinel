@@ -2,47 +2,48 @@ import re
 import numpy as np
 import joblib
 from pathlib import Path
-from sklearn.metrics.pairwise import cosine_similarity
 
 # ============================================================================
 # MODEL LOADING
 # ============================================================================
 MODEL_DIR = Path(__file__).parent.parent / "ai_engine" / "models"
 
-# Load all 4 models at module startup — once only
-scaler                = joblib.load(MODEL_DIR / "expert_scaler.pkl")
-isolation_forest      = joblib.load(MODEL_DIR / "expert_if_watchdog.pkl")
-tfidf_vectorizer      = joblib.load(MODEL_DIR / "tfidf_vectorizer.pkl")
-tfidf_baseline_matrix = joblib.load(MODEL_DIR / "tfidf_baseline_matrix.pkl")
-
-# Calibrated threshold from notebook (BEST_TFIDF_THRESHOLD = 0.9455)
-# DO NOT load from pkl — it was saved with wrong value 0.25 in some versions
-TFIDF_THRESHOLD = 0.9455
-
-# Feature names in exact training order — DO NOT CHANGE THIS ORDER
-FEATURES = [
-    'cpu_smoothed',
-    'mem_smoothed',
-    'db_smoothed',
-    'error_smoothed',
-    'cpu_diff',
-    'mem_diff',
-    'db_diff'
-]
+# Load models saved by the notebook
+tfidf_vectorizer = joblib.load(MODEL_DIR / "tfidf_vectorizer.pkl")
+best_model       = joblib.load(MODEL_DIR / "best_model.pkl")       # LogisticRegression
+scaler           = joblib.load(MODEL_DIR / "scaler.pkl")           # StandardScaler for LR features
+metric_features  = joblib.load(MODEL_DIR / "metric_features.pkl")  # list of metric feature names
 
 # ── Startup verification ──────────────────────────────────────────────────────
-_test_vec = tfidf_vectorizer.transform(['info health check passed'])
-_test_sim = float(cosine_similarity(_test_vec, tfidf_baseline_matrix).max())
-print(f"[STARTUP] TF-IDF verification: 'info health check passed' → sim={_test_sim:.4f}")
-if _test_sim < 0.5:
-    print("[WARNING] TF-IDF models may be wrong — expected sim > 0.9 for normal log")
-else:
-    print("[OK] Models loaded and verified correctly")
+try:
+    _test_text_vec = tfidf_vectorizer.transform(['info health check passed']).toarray()
+    _test_metric_vec = scaler.transform(np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]).reshape(1, -1))
+    _test_combined = np.hstack([_test_metric_vec, _test_text_vec])
+    _test_pred = best_model.predict(_test_combined)
+    print(f"[STARTUP] Model verification: 'info health check passed' → pred={_test_pred[0]}")
+    print("[OK] All models loaded and verified correctly")
+except Exception as e:
+    print(f"[WARNING] Startup verification failed: {e}")
+
 
 # Backwards-compatible initializer for main.py imports
 def initialize_models():
     """Models are loaded at module import; keep this for compatibility."""
     return True
+
+
+# Convenience alias so main.py's load_model() check still works
+def load_model(name: str):
+    """Return the requested model object (raises if unknown key)."""
+    _registry = {
+        "tfidf_vectorizer": tfidf_vectorizer,
+        "best_model":       best_model,
+        "scaler":           scaler,
+        "metric_features":  metric_features,
+    }
+    if name not in _registry:
+        raise KeyError(f"Unknown model key: {name}")
+    return _registry[name]
 
 
 # ============================================================================
@@ -52,8 +53,8 @@ def initialize_models():
 def _normalize_log(text: str) -> str:
     """
     Normalize log text before TF-IDF transform.
-    This MUST match the clean_log_text() function used during training.
-    Steps: lowercase → digits to NUM → hex IDs to ID → remove punctuation → collapse spaces
+    Matches clean_log_text() used during training:
+      lowercase → digits→NUM → hex IDs→ID → remove punctuation → collapse spaces
     """
     text = str(text).lower()
     text = re.sub(r'\b\d+\b', ' NUM ', text)        # digits → NUM
@@ -64,10 +65,7 @@ def _normalize_log(text: str) -> str:
 
 # ============================================================================
 # LAYER 3 — RULE ENGINE
-# Handles Scenario 5 (Disk) and Scenario 6 (SSL) — no ML needed
-# Thresholds from log-dataset.md:
-#   Disk WARNING=90%  Disk CRITICAL=95%
-#   SSL  WARNING=7d   SSL  CRITICAL=1d
+# Handles Disk and SSL scenarios — no ML needed
 # ============================================================================
 def _run_rules(disk_percent: float, cert_days_left: int) -> list:
     alerts = []
@@ -95,94 +93,123 @@ def _run_rules(disk_percent: float, cert_days_left: int) -> list:
 
 
 # ============================================================================
-# MAIN DETECTION FUNCTION
+# LOG ANOMALY DETECTION — TF-IDF + Logistic Regression
 # ============================================================================
-def detect_log_anomaly(log_message: str) -> dict:
+def detect_log_anomaly(log_message: str, cpu: float = 0.0, memory: float = 0.0, db_errors: float = 0.0) -> dict:
     """
-    TF-IDF layer only — for the /api/ml/log-anomaly endpoint.
-    Normalizes the log text, computes max cosine similarity against
-    the normal baseline, and compares to the calibrated threshold.
-
-    similarity >= 0.9455 → normal (looks like training normal logs)
-    similarity <  0.9455 → anomaly (unseen pattern)
+    Detect anomaly in a log message using Logistic Regression on combined features.
+    
+    The model was trained on 507 features (7 metrics + 500 TF-IDF features).
+    If metrics are 0 (e.g. standalone log testing), we neutralize the metric vector
+    by setting it to 0s to prevent them from negatively skewing the prediction towards 'Normal'.
     """
     try:
+        # A. Process Text
         log_norm   = _normalize_log(log_message)
-        log_vector = tfidf_vectorizer.transform([log_norm])
-        # Use .max() not .mean() — max finds the most similar normal log
-        sim        = float(cosine_similarity(log_vector, tfidf_baseline_matrix).max())
-        is_anomaly = sim < TFIDF_THRESHOLD
+        text_vec   = tfidf_vectorizer.transform([log_norm]).toarray()
+        
+        # B. Process Metrics
+        # If all core metrics are precisely 0.0, we assume this is a standalone text test
+        # Setting metric_vec to np.zeros((1, 7)) simulates "average" metrics because
+        # StandardScaler was fit with mean=True.
+        if cpu == 0.0 and memory == 0.0 and db_errors == 0.0:
+            metric_vec = np.zeros((1, 7))
+        else:
+            metric_arr = np.array([cpu, memory, db_errors, 0.0, 0.0, 0.0, 0.0]).reshape(1, -1)
+            metric_vec = scaler.transform(metric_arr)
+        
+        # C. Combine
+        combined = np.hstack([metric_vec, text_vec])
+
+        # D. Predict
+        prediction = int(best_model.predict(combined)[0])
+        is_anomaly = (prediction == 1)
+
+        # Confidence score
+        if hasattr(best_model, 'predict_proba'):
+            proba      = best_model.predict_proba(combined)[0]
+            confidence = float(proba[prediction])
+        else:
+            # decision_function fallback
+            score      = float(best_model.decision_function(combined)[0])
+            confidence = round(abs(score), 4)
 
         return {
-            'anomaly':          bool(is_anomaly),
-            'similarity_score': round(sim, 4),
-            'threshold':        TFIDF_THRESHOLD,
-            'message':          'Anomalous log detected' if is_anomaly else 'Normal log'
+            'anomaly':    bool(is_anomaly),
+            'confidence': round(confidence, 4),
+            'prediction': prediction,
+            'message':    'Anomalous log detected' if is_anomaly else 'Normal log'
         }
     except Exception as e:
         return {'error': str(e), 'anomaly': None}
 
 
+# ============================================================================
+# METRIC ANOMALY DETECTION — rule-based thresholds (no IsolationForest)
+# The notebook removed the IsolationForest; we use simple threshold rules.
+# ============================================================================
 def detect_metric_anomaly(cpu: float = 0, memory: float = 0,
                            db_errors: float = 0) -> dict:
     """
-    Isolation Forest layer only — for the /api/ml/metric-anomaly endpoint.
-    The scaler expects exactly 7 features in the FEATURES order.
-    cpu_diff, mem_diff, db_diff are 0 for single-window calls (no history).
+    Detect metric anomalies using threshold rules.
+    cpu / memory in percent (0-100), db_errors as count.
     """
     try:
-        feature_vector = np.array([
-            cpu, memory, db_errors, 0.0,   # cpu_smoothed, mem_smoothed, db_smoothed, error_smoothed
-            0.0, 0.0, 0.0                   # cpu_diff, mem_diff, db_diff
-        ]).reshape(1, -1)
+        alerts = []
+        if cpu >= 90:
+            alerts.append(f"CPU critical: {cpu}%")
+        elif cpu >= 75:
+            alerts.append(f"CPU high: {cpu}%")
 
-        scaled     = scaler.transform(feature_vector)
-        prediction = isolation_forest.predict(scaled)[0]       # -1=anomaly, 1=normal
-        score      = float(isolation_forest.decision_function(scaled)[0])
-        is_anomaly = (prediction == -1)
+        if memory >= 90:
+            alerts.append(f"Memory critical: {memory}%")
+        elif memory >= 80:
+            alerts.append(f"Memory high: {memory}%")
+
+        if db_errors >= 10:
+            alerts.append(f"DB errors critical: {db_errors}")
+        elif db_errors >= 5:
+            alerts.append(f"DB errors elevated: {db_errors}")
+
+        is_anomaly = len(alerts) > 0
 
         return {
-            'anomaly':                bool(is_anomaly),
-            'isolation_forest_score': round(score, 4),
-            'raw_scores':             {'cpu': cpu, 'memory': memory, 'db_errors': db_errors},
-            'message':                'Metric anomaly detected' if is_anomaly else 'Metrics normal'
+            'anomaly':   bool(is_anomaly),
+            'alerts':    alerts,
+            'raw_scores': {'cpu': cpu, 'memory': memory, 'db_errors': db_errors},
+            'message':   'Metric anomaly detected' if is_anomaly else 'Metrics normal'
         }
     except Exception as e:
         return {'error': str(e), 'anomaly': None}
 
 
+# ============================================================================
+# FULL PIPELINE — score_window (called by monitoring loop)
+# ============================================================================
 def score_window(metrics: dict, raw_log: str,
-                 disk_percent: float, cert_days_left: int) -> dict:
+                 disk_percent: float = 0, cert_days_left: int = 365) -> dict:
     """
     Full 3-layer pipeline — called by the monitoring loop every 30 seconds.
 
     Parameters
     ----------
-    metrics : dict with exactly the 7 FEATURES keys
+    metrics : dict with cpu, memory, db_errors (and optionally diff fields)
     raw_log : most recent log line from Elasticsearch
     disk_percent : current disk usage (0-100)
     cert_days_left : days until SSL certificate expires
-
-    Returns
-    -------
-    dict with triggered, layer breakdown, and action
     """
-    # ── Layer 1: Isolation Forest (metric anomaly) ─────────────────────────
-    feature_vector = np.array(
-        [metrics[f] for f in FEATURES], dtype=float
-    ).reshape(1, -1)
+    # ── Layer 1: Metric thresholds ─────────────────────────────────────────
+    cpu      = metrics.get('cpu_smoothed', metrics.get('cpu', 0))
+    memory   = metrics.get('mem_smoothed', metrics.get('memory', 0))
+    db_err   = metrics.get('db_smoothed',  metrics.get('db_errors', 0))
+    metric_r = detect_metric_anomaly(cpu, memory, db_err)
+    metric_anomaly = metric_r.get('anomaly', False)
 
-    scaled     = scaler.transform(feature_vector)
-    if_score   = float(isolation_forest.decision_function(scaled)[0])
-    if_anomaly = isolation_forest.predict(scaled)[0] == -1
+    # ── Layer 2: TF-IDF + LR (log text anomaly) ───────────────────────────
+    log_r      = detect_log_anomaly(raw_log, cpu=cpu, memory=memory, db_errors=db_err)
+    tfidf_anom = log_r.get('anomaly', False)
 
-    # ── Layer 2: TF-IDF (log text anomaly) ────────────────────────────────
-    log_norm    = _normalize_log(raw_log)
-    log_vector  = tfidf_vectorizer.transform([log_norm])
-    sim         = float(cosine_similarity(log_vector, tfidf_baseline_matrix).max())
-    tfidf_anom  = sim < TFIDF_THRESHOLD
-
-    # Keyword guard — catches ERROR/FATAL/CRITICAL even if TF-IDF misses
+    # Keyword guard — catches ERROR/FATAL/CRITICAL even if LR misses
     kw_anom = bool(re.search(
         r'\bERROR\b|\bFATAL\b|\bCRITICAL\b|OOMKill|EXHAUSTED',
         raw_log, re.IGNORECASE
@@ -192,32 +219,35 @@ def score_window(metrics: dict, raw_log: str,
     rule_alerts = _run_rules(disk_percent, cert_days_left)
 
     # ── Final decision: ANY layer triggers = anomaly ───────────────────────
-    triggered = if_anomaly or tfidf_anom or kw_anom or len(rule_alerts) > 0
+    triggered = metric_anomaly or tfidf_anom or kw_anom or len(rule_alerts) > 0
 
     return {
-        'triggered':     triggered,
-        'if_score':      round(if_score, 4),
-        'if_anomaly':    if_anomaly,
-        'tfidf_sim':     round(sim, 4),
-        'tfidf_anomaly': tfidf_anom,
-        'kw_anomaly':    kw_anom,
-        'rule_alerts':   rule_alerts,
-        'action':        'TRIGGER_LLM' if triggered else 'HEALTHY',
+        'triggered':       triggered,
+        'metric_anomaly':  metric_anomaly,
+        'metric_alerts':   metric_r.get('alerts', []),
+        'tfidf_anomaly':   tfidf_anom,
+        'log_confidence':  log_r.get('confidence', 0),
+        'kw_anomaly':      kw_anom,
+        'rule_alerts':     rule_alerts,
+        'action':          'TRIGGER_LLM' if triggered else 'HEALTHY',
     }
 
 
+# ============================================================================
+# COMBINED ANALYSIS
+# ============================================================================
 def full_system_analysis(log_message: str, cpu: float = 0,
                           memory: float = 0, db_errors: float = 0) -> dict:
     """
-    Combined analysis — for the /api/ml/full-analysis endpoint.
-    Runs both TF-IDF and Isolation Forest separately and combines results.
+    Combined analysis — for the /api/predict/system-analysis endpoint.
+    Runs both log anomaly and metric anomaly and combines results.
     """
-    log_result    = detect_log_anomaly(log_message)
+    log_result    = detect_log_anomaly(log_message, cpu=cpu, memory=memory, db_errors=db_errors)
     metric_result = detect_metric_anomaly(cpu, memory, db_errors)
 
     anomaly_count = sum([
-        log_result.get('anomaly', False),
-        metric_result.get('anomaly', False)
+        bool(log_result.get('anomaly', False)),
+        bool(metric_result.get('anomaly', False))
     ])
 
     if anomaly_count >= 2:

@@ -4,7 +4,7 @@ import json
 import re
 
 # Config
-OTEL_HTTP_URL = "http://192.168.159.136:30318/v1/logs"
+OTEL_HTTP_URL = "http://192.168.159.136:31550/v1/logs"
 DATASET_PATH = "../log-dataset.md"
 
 

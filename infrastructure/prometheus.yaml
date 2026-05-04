@@ -7,17 +7,19 @@ data:
     global:
       scrape_interval: 10s
     scrape_configs:
-      - job_name: 'otel-collector'
+      - job_name: 'otel-collector-metrics'
         static_configs:
           - targets: ['otel-collector:8889']
       - job_name: "prometheus"
         static_configs:
-          - targets: ["localhost:9090"]
-
-      - job_name: "backend-fastapi"
+          - targets: ["192.168.159.136:9090"]
+      - job_name: 'otel-health'
+        static_configs:
+          - targets: ['otel-collector:8888']  
+      - job_name: " "
         metrics_path: /metrics
         static_configs:
-          - targets: ["host.k3d.internal:8000"] 
+          - targets: ["192.168.159.1:8000"]
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -37,6 +39,12 @@ spec:
       - name: prometheus
         image: prom/prometheus:latest
         args: ["--config.file=/etc/prometheus/prometheus.yml"]
+         # Limite de RAM pour tes 16Go
+        resources:
+          limits:
+            memory: "512Mi"
+        ports:
+        - containerPort: 9090
         volumeMounts:
         - name: config-vol
           mountPath: /etc/prometheus

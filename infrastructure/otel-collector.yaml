@@ -19,11 +19,14 @@ data:
       batch:
     exporters:
       elasticsearch:
-        endpoints: ["http://10.43.121.156:9200"]  # Point to Elasticsearch service
+        endpoints: ["http://10.43.160.40:9200"]  # Point to Elasticsearch service
         logs_index: "vermeg-logs"
       prometheus:
         endpoint: "0.0.0.0:8889"
     service:
+      telemetry:
+        metrics:
+          address: 0.0.0.0:8888
       pipelines:
         logs:
           receivers: [otlp]
@@ -85,7 +88,11 @@ spec:
   - name: otlp-http
     port: 4318
     targetPort: 4318
+    nodePort: 31550 # Access OTEL Collector at http://<node-ip>:30318/v1/logs
   - name: prometheus
     port: 8889
     targetPort: 8889
+  - name: otel-health # --- AJOUT ICI ---
+    port: 8888
+    targetPort: 8888
   type: NodePort

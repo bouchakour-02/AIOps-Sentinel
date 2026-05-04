@@ -8,13 +8,14 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import uuid
+from prometheus_fastapi_instrumentator import Instrumentator 
 
 # Import ML models
 from aggregator import initialize_models, detect_log_anomaly, detect_metric_anomaly, full_system_analysis
 
 # Import observability stack (optional)
 from elasticsearch_client import get_es_client
-from prometheus_client import get_prom_client
+from prom_service import get_prom_client
 
 # Try to import OTEL (optional)
 try:
@@ -84,8 +85,8 @@ def _resolve_observability_url(
 
 ES_URL = _resolve_observability_url(
     env_var="ELASTICSEARCH_URL",
-    localhost_url="http://localhost:9200",
-    vm_url=f"http://{os.getenv('OBS_VM_HOST', '192.168.159.136')}:9200",
+    localhost_url="http://192.168.159.136:30200",
+    vm_url=f"http://{os.getenv('OBS_VM_HOST', '192.168.159.136')}:30200",
     health_path="/_cluster/health"
 )
 PROM_URL = _resolve_observability_url(
@@ -118,6 +119,8 @@ async def add_trace_id(request, call_next):
     response.headers["X-Trace-ID"] = trace_id
     return response
 
+Instrumentator().instrument(app).expose(app)
+
 @app.get("/")
 def home():
     return {"status": "Backend Active"}
@@ -141,18 +144,18 @@ def _extract_message(source: Dict[str, Any]) -> str:
     if isinstance(body, dict):
         return body.get("stringValue") or body.get("text") or ""
 
-    msg = source.get("message")
-    if isinstance(msg, str) and msg:
-        return msg
-    if isinstance(msg, dict):
-        return msg.get("stringValue") or msg.get("text") or ""
-
+    # Try lowercase variants
     body_l = source.get("body")
     if isinstance(body_l, str) and body_l:
         return body_l
     if isinstance(body_l, dict):
         return body_l.get("stringValue") or body_l.get("text") or ""
 
+    msg = source.get("message")
+    if isinstance(msg, str) and msg:
+        return msg
+    if isinstance(msg, dict):
+        return msg.get("stringValue") or msg.get("text") or ""
     return ""
 
 
@@ -313,15 +316,14 @@ def models_status():
     """Check if all ML models are loaded"""
     try:
         from aggregator import load_model
-        models = ["expert_scaler", "expert_if_watchdog", "tfidf_vectorizer", 
-                  "tfidf_baseline_matrix", "tfidf_threshold"]
+        models = ["tfidf_vectorizer", "best_model", "scaler", "metric_features"]
         status = {}
         for model in models:
             try:
                 load_model(model)
                 status[model] = "[OK] Loaded"
-            except:
-                status[model] = "[ERROR] Missing"
+            except Exception as exc:
+                status[model] = f"[ERROR] {exc}"
         return {"models": status}
     except Exception as e:
         return {"error": str(e)}
@@ -409,12 +411,12 @@ def batch_predict_logs(limit: int = 50):
             "log_id": log["id"],
             "message": log["message"],
             "anomaly": pred["anomaly"],
-            "score": pred.get("similarity_score"),
+            "score": pred.get("confidence"),
             "timestamp": log["timestamp"]
         })
     
     obs_manager.record_ml_prediction(
-        model_name="tfidf_batch",
+        model_name="lr_tfidf_batch",
         anomaly_detected=any(p["anomaly"] for p in predictions),
         confidence=sum(p["score"] for p in predictions if p["score"]) / len(predictions) if predictions else 0,
         latency_ms=0
